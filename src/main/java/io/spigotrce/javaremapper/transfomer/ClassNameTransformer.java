@@ -22,10 +22,6 @@ public class ClassNameTransformer extends AbstractTransformer {
     private final Set<String> usedNames = new HashSet<>();
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
 
-    private SimpleRemapper createRemapper() {
-        return new SimpleRemapper(classNameMap);
-    }
-
     private String generateRandomName(String originalName) {
         return classNameCache.computeIfAbsent(originalName.hashCode(), k -> {
             String newName;
@@ -60,13 +56,13 @@ public class ClassNameTransformer extends AbstractTransformer {
             }
         }
 
-        SimpleRemapper remapper = createRemapper();
-
         try (JarFile jarFile = new JarFile(inputJar);
              FileOutputStream fos = new FileOutputStream(outputJar);
              JarOutputStream jos = new JarOutputStream(fos)) {
 
             Enumeration<JarEntry> entries = jarFile.entries();
+            SimpleRemapper remapper = new SimpleRemapper(classNameMap);
+
             while (entries.hasMoreElements()) {
                 JarEntry entry = entries.nextElement();
                 InputStream is = jarFile.getInputStream(entry);
@@ -74,11 +70,11 @@ public class ClassNameTransformer extends AbstractTransformer {
                 if (entry.getName().endsWith(".class")) {
                     ClassReader cr = new ClassReader(is);
                     ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-                    ClassVisitor cv = new FixedClassRemapper(cw, remapper);
-                    cr.accept(cv, 0);
+                    ClassRemapper classRemapper = new ClassRemapper(cw, remapper);
+                    cr.accept(classRemapper, 0);
 
                     String originalName = entry.getName().replace(".class", "");
-                    String newName = classNameMap.getOrDefault(originalName, originalName);
+                    String newName = remapper.mapType(originalName);
 
                     jos.putNextEntry(new JarEntry(newName + ".class"));
                     jos.write(cw.toByteArray());
@@ -217,60 +213,5 @@ public class ClassNameTransformer extends AbstractTransformer {
         }
 
         return content;
-    }
-
-    private static class FixedClassRemapper extends ClassRemapper {
-        public FixedClassRemapper(ClassVisitor cv, SimpleRemapper remapper) {
-            super(Opcodes.ASM9, cv, remapper);
-        }
-
-        @Override
-        public MethodVisitor visitMethod(int access, String name, String descriptor, String signature, String[] exceptions) {
-            MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
-            return new MethodRemapperFixer(api, mv, (SimpleRemapper) remapper);
-        }
-
-        @Override
-        public void visitSource(String source, String debug) {
-            if (source != null) {
-                super.visitSource(Main.generateString() + ".java", debug);
-            } else {
-                super.visitSource(null, debug);
-            }
-        }
-    }
-
-    static class MethodRemapperFixer extends MethodVisitor {
-        private final SimpleRemapper remapper;
-
-        public MethodRemapperFixer(int api, MethodVisitor mv, SimpleRemapper remapper) {
-            super(api, mv);
-            this.remapper = remapper;
-        }
-
-        @Override
-        public void visitLdcInsn(Object value) {
-            if (value instanceof String str) {
-                if (remapper.map(str) != null && !str.equals(remapper.map(str))) {
-                    super.visitLdcInsn(remapper.map(str));
-                    return;
-                }
-            } else if (value instanceof Type t) {
-                super.visitLdcInsn(Type.getType(remapper.mapDesc(t.getDescriptor())));
-                return;
-            }
-            super.visitLdcInsn(value);
-        }
-
-        @Override
-        public void visitInvokeDynamicInsn(String name, String descriptor, Handle bootstrapMethodHandle, Object... bootstrapMethodArguments) {
-            for (int i = 0; i < bootstrapMethodArguments.length; i++) {
-                Object arg = bootstrapMethodArguments[i];
-                if (arg instanceof Type) {
-                    bootstrapMethodArguments[i] = Type.getType(remapper.mapDesc(((Type) arg).getDescriptor()));
-                }
-            }
-            super.visitInvokeDynamicInsn(name, remapper.mapDesc(descriptor), bootstrapMethodHandle, bootstrapMethodArguments);
-        }
     }
 }
